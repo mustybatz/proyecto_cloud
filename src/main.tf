@@ -164,6 +164,20 @@ resource "aws_instance" "bastion_server" {
   ]
 }
 
+resource "aws_instance" "bastion_server_2" {
+  ami                         = "ami-0854e54abaeae283b"
+  instance_type               = "t3.medium"
+  subnet_id                   = aws_subnet.public_a.id
+  associate_public_ip_address = true
+  key_name                    = "cloud"
+  security_groups             = [aws_security_group.server.id]
+
+
+  depends_on = [
+    aws_security_group.server
+  ]
+}
+
 resource "aws_launch_configuration" "backend" {
   name_prefix     = "node-"
   image_id        = "ami-0854e54abaeae283b"
