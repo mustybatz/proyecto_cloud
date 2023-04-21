@@ -14,7 +14,9 @@ provider "aws" {
 }
 
 resource "aws_vpc" "main" {
-  cidr_block = "192.168.0.0/16"
+  cidr_block           = "192.168.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
 }
 
 resource "aws_internet_gateway" "main" {
@@ -158,6 +160,8 @@ resource "aws_instance" "bastion_server" {
   key_name                    = "cloud"
   security_groups             = [aws_security_group.server.id]
 
+  user_data = file("./scripts/bastion.sh")
+
 
   depends_on = [
     aws_security_group.server
@@ -184,7 +188,7 @@ resource "aws_launch_configuration" "backend" {
   instance_type   = "t2.micro"
   user_data       = file("./scripts/user-data.sh")
   security_groups = [aws_security_group.server.id]
-  key_name = "cloud"
+  key_name        = "cloud"
 
   lifecycle {
     create_before_destroy = true
@@ -236,4 +240,44 @@ resource "aws_lb_target_group" "backend" {
 resource "aws_autoscaling_attachment" "backend" {
   autoscaling_group_name = aws_autoscaling_group.backend.id
   alb_target_group_arn   = aws_lb_target_group.backend.arn
+}
+
+resource "aws_db_subnet_group" "backend-rds" {
+  name       = "backend-rds"
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
+
+resource "aws_security_group" "backend-rds" {
+  name        = "backend-rds"
+  description = "Allow RDS traffic"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "MySQL"
+    from_port   = 3306
+    to_port     = 3306
+    protocol    = "tcp"
+    security_groups = [aws_security_group.server.id]
+  }
+
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_db_instance" "backend-rds" {
+  db_subnet_group_name = aws_db_subnet_group.backend-rds.name
+  db_name              = "backend"
+  engine               = "mysql"
+  engine_version       = "5.7"
+  instance_class       = "db.t2.micro"
+  username             = "admin"
+  password             = "motomami"
+  parameter_group_name = "default.mysql5.7"
+  allocated_storage = 30
+  vpc_security_group_ids = [ aws_security_group.backend-rds.id ]
+  skip_final_snapshot = true
 }
