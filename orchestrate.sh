@@ -3,7 +3,7 @@
 cd src  
 
 # Crear infraestrucura
-#terraform apply -auto-approve
+terraform apply -auto-approve
 
 # Determina variables de la infraestructura creada
 bastion_ip=$(terraform output -raw bastion_ip)

@@ -118,6 +118,27 @@ resource "aws_key_pair" "test-pair" {
   public_key = file("~/.ssh/id_rsa.pub")
 }
 
+resource "aws_security_group" "alb" {
+  name        = "alb"
+  description = "Allow traffic from ALB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
 resource "aws_security_group" "server" {
   name        = "server"
   description = "Allow SSH and HTTP traffic"
@@ -133,11 +154,20 @@ resource "aws_security_group" "server" {
 
   ingress {
     description = "HTTP"
-    from_port   = 80
-    to_port     = 80
+    from_port   = 3000
+    to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  ingress {
+    description = "Allow traffic from ALB"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
 
   egress {
     from_port        = 0
@@ -151,6 +181,46 @@ resource "aws_security_group" "server" {
     Name = "allow_tls"
   }
 }
+
+
+
+
+
+resource "aws_security_group" "backend-rds" {
+  name        = "backend-rds"
+  description = "Allow RDS traffic"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "MySQL"
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.server.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_db_instance" "backend-rds" {
+  db_subnet_group_name   = aws_db_subnet_group.backend-rds.name
+  db_name                = "backend"
+  engine                 = "mysql"
+  engine_version         = "5.7"
+  instance_class         = "db.t2.micro"
+  username               = "admin"
+  password               = "motomami"
+  parameter_group_name   = "default.mysql5.7"
+  allocated_storage      = 30
+  vpc_security_group_ids = [aws_security_group.backend-rds.id]
+  skip_final_snapshot    = true
+}
+
 
 resource "aws_instance" "bastion_server" {
   ami                         = "ami-0854e54abaeae283b"
@@ -168,25 +238,20 @@ resource "aws_instance" "bastion_server" {
   ]
 }
 
-resource "aws_instance" "bastion_server_2" {
-  ami                         = "ami-0854e54abaeae283b"
-  instance_type               = "t3.medium"
-  subnet_id                   = aws_subnet.public_a.id
-  associate_public_ip_address = true
-  key_name                    = "cloud"
-  security_groups             = [aws_security_group.server.id]
+data "template_file" "user_data" {
+  template = file("./scripts/user-data.tpl")
 
+  vars = {
+    rds_hostname = aws_db_instance.backend-rds.address
+  }
 
-  depends_on = [
-    aws_security_group.server
-  ]
 }
 
 resource "aws_launch_configuration" "backend" {
   name_prefix     = "node-"
   image_id        = "ami-0854e54abaeae283b"
   instance_type   = "t2.micro"
-  user_data       = file("./scripts/user-data.sh")
+  user_data       = data.template_file.user_data.rendered
   security_groups = [aws_security_group.server.id]
   key_name        = "cloud"
 
@@ -214,7 +279,7 @@ resource "aws_lb" "backend" {
   name               = "backend-lb"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.server.id]
+  security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
 }
 
@@ -231,7 +296,7 @@ resource "aws_lb_listener" "backend" {
 
 resource "aws_lb_target_group" "backend" {
   name     = "backend"
-  port     = 80
+  port     = 3000
   protocol = "HTTP"
   vpc_id   = aws_vpc.main.id
 }
@@ -245,39 +310,4 @@ resource "aws_autoscaling_attachment" "backend" {
 resource "aws_db_subnet_group" "backend-rds" {
   name       = "backend-rds"
   subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
-}
-
-resource "aws_security_group" "backend-rds" {
-  name        = "backend-rds"
-  description = "Allow RDS traffic"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "MySQL"
-    from_port   = 3306
-    to_port     = 3306
-    protocol    = "tcp"
-    security_groups = [aws_security_group.server.id]
-  }
-
-  egress {
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-  }
-}
-
-resource "aws_db_instance" "backend-rds" {
-  db_subnet_group_name = aws_db_subnet_group.backend-rds.name
-  db_name              = "backend"
-  engine               = "mysql"
-  engine_version       = "5.7"
-  instance_class       = "db.t2.micro"
-  username             = "admin"
-  password             = "motomami"
-  parameter_group_name = "default.mysql5.7"
-  allocated_storage = 30
-  vpc_security_group_ids = [ aws_security_group.backend-rds.id ]
-  skip_final_snapshot = true
 }
