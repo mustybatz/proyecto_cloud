@@ -14,7 +14,9 @@ provider "aws" {
 }
 
 resource "aws_vpc" "main" {
-  cidr_block = "192.168.0.0/16"
+  cidr_block           = "192.168.0.0/16"
+  enable_dns_hostnames = true
+  enable_dns_support   = true
 }
 
 resource "aws_internet_gateway" "main" {
@@ -113,7 +115,28 @@ resource "aws_route_table_association" "private_b" {
 
 resource "aws_key_pair" "test-pair" {
   key_name   = "cloud"
-  public_key = file("~/.ssh/id_rsa.pub")
+  public_key = file("../tests/keys/id_rsa.pub")
+}
+
+resource "aws_security_group" "alb" {
+  name        = "alb"
+  description = "Allow traffic from ALB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description = "HTTP"
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 resource "aws_security_group" "server" {
@@ -131,11 +154,20 @@ resource "aws_security_group" "server" {
 
   ingress {
     description = "HTTP"
-    from_port   = 80
-    to_port     = 80
+    from_port   = 3000
+    to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+
+  ingress {
+    description = "Allow traffic from ALB"
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    security_groups = [aws_security_group.alb.id]
+  }
+
 
   egress {
     from_port        = 0
@@ -150,6 +182,42 @@ resource "aws_security_group" "server" {
   }
 }
 
+resource "aws_security_group" "backend-rds" {
+  name        = "backend-rds"
+  description = "Allow RDS traffic"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    description     = "MySQL"
+    from_port       = 3306
+    to_port         = 3306
+    protocol        = "tcp"
+    security_groups = [aws_security_group.server.id]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+resource "aws_db_instance" "backend-rds" {
+  db_subnet_group_name   = aws_db_subnet_group.backend-rds.name
+  db_name                = "backend"
+  engine                 = "mysql"
+  engine_version         = "5.7"
+  instance_class         = "db.t2.micro"
+  username               = "admin"
+  password               = "motomami"
+  parameter_group_name   = "default.mysql5.7"
+  allocated_storage      = 30
+  vpc_security_group_ids = [aws_security_group.backend-rds.id]
+  skip_final_snapshot    = true
+}
+
+
 resource "aws_instance" "bastion_server" {
   ami                         = "ami-0854e54abaeae283b"
   instance_type               = "t2.micro"
@@ -158,19 +226,30 @@ resource "aws_instance" "bastion_server" {
   key_name                    = "cloud"
   security_groups             = [aws_security_group.server.id]
 
+  user_data = file("./scripts/bastion.sh")
+
 
   depends_on = [
     aws_security_group.server
   ]
 }
 
+data "template_file" "user_data" {
+  template = file("./scripts/user-data.tpl")
+
+  vars = {
+    rds_hostname = aws_db_instance.backend-rds.address
+  }
+
+}
+
 resource "aws_launch_configuration" "backend" {
   name_prefix     = "node-"
   image_id        = "ami-0854e54abaeae283b"
   instance_type   = "t2.micro"
-  user_data       = file("./scripts/user-data.sh")
+  user_data       = data.template_file.user_data.rendered
   security_groups = [aws_security_group.server.id]
-  key_name = "cloud"
+  key_name        = "cloud"
 
   lifecycle {
     create_before_destroy = true
@@ -180,7 +259,7 @@ resource "aws_launch_configuration" "backend" {
 resource "aws_autoscaling_group" "backend" {
   name                 = "backend"
   min_size             = 2
-  max_size             = 4
+  max_size             = 5
   desired_capacity     = 2
   launch_configuration = aws_launch_configuration.backend.name
   vpc_zone_identifier  = [aws_subnet.private_a.id, aws_subnet.private_b.id]
@@ -196,7 +275,7 @@ resource "aws_lb" "backend" {
   name               = "backend-lb"
   internal           = false
   load_balancer_type = "application"
-  security_groups    = [aws_security_group.server.id]
+  security_groups    = [aws_security_group.alb.id]
   subnets            = [aws_subnet.public_a.id, aws_subnet.public_b.id]
 }
 
@@ -213,7 +292,7 @@ resource "aws_lb_listener" "backend" {
 
 resource "aws_lb_target_group" "backend" {
   name     = "backend"
-  port     = 80
+  port     = 3000
   protocol = "HTTP"
   vpc_id   = aws_vpc.main.id
 }
@@ -223,3 +302,59 @@ resource "aws_autoscaling_attachment" "backend" {
   autoscaling_group_name = aws_autoscaling_group.backend.id
   alb_target_group_arn   = aws_lb_target_group.backend.arn
 }
+
+resource "aws_db_subnet_group" "backend-rds" {
+  name       = "backend-rds"
+  subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
+}
+
+resource "aws_autoscaling_policy" "scale_down" {
+  name                   = "backend_scale_down"
+  autoscaling_group_name = aws_autoscaling_group.backend.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 120
+}
+
+resource "aws_autoscaling_policy" "scale_up" {
+  name                   = "backend_scale_up"
+  autoscaling_group_name = aws_autoscaling_group.backend.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 120
+}
+
+resource "aws_cloudwatch_metric_alarm" "scale_down" {
+  alarm_description   = "Monitors CPU utilization for backend ASG"
+  alarm_actions       = [aws_autoscaling_policy.scale_down.arn]
+  alarm_name          = "backend_scale_down"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUUtilization"
+  threshold           = "10"
+  evaluation_periods  = "2"
+  period              = "120"
+  statistic           = "Average"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.backend.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "scale_up" {
+  alarm_description   = "Monitors CPU utilization for backend ASG"
+  alarm_actions       = [aws_autoscaling_policy.scale_up.arn]
+  alarm_name          = "backend_scale_up"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUUtilization"
+  threshold           = "50"
+  evaluation_periods  = "1"
+  period              = "10"
+  statistic           = "Average"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.backend.name
+  }
+}
+
