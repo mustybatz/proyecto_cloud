@@ -115,7 +115,7 @@ resource "aws_route_table_association" "private_b" {
 
 resource "aws_key_pair" "test-pair" {
   key_name   = "cloud"
-  public_key = file("~/.ssh/id_rsa.pub")
+  public_key = file("../tests/keys/id_rsa.pub")
 }
 
 resource "aws_security_group" "alb" {
@@ -181,10 +181,6 @@ resource "aws_security_group" "server" {
     Name = "allow_tls"
   }
 }
-
-
-
-
 
 resource "aws_security_group" "backend-rds" {
   name        = "backend-rds"
@@ -263,7 +259,7 @@ resource "aws_launch_configuration" "backend" {
 resource "aws_autoscaling_group" "backend" {
   name                 = "backend"
   min_size             = 2
-  max_size             = 4
+  max_size             = 5
   desired_capacity     = 2
   launch_configuration = aws_launch_configuration.backend.name
   vpc_zone_identifier  = [aws_subnet.private_a.id, aws_subnet.private_b.id]
@@ -311,3 +307,54 @@ resource "aws_db_subnet_group" "backend-rds" {
   name       = "backend-rds"
   subnet_ids = [aws_subnet.private_a.id, aws_subnet.private_b.id]
 }
+
+resource "aws_autoscaling_policy" "scale_down" {
+  name                   = "backend_scale_down"
+  autoscaling_group_name = aws_autoscaling_group.backend.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = -1
+  cooldown               = 120
+}
+
+resource "aws_autoscaling_policy" "scale_up" {
+  name                   = "backend_scale_up"
+  autoscaling_group_name = aws_autoscaling_group.backend.name
+  adjustment_type        = "ChangeInCapacity"
+  scaling_adjustment     = 1
+  cooldown               = 120
+}
+
+resource "aws_cloudwatch_metric_alarm" "scale_down" {
+  alarm_description   = "Monitors CPU utilization for backend ASG"
+  alarm_actions       = [aws_autoscaling_policy.scale_down.arn]
+  alarm_name          = "backend_scale_down"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUUtilization"
+  threshold           = "10"
+  evaluation_periods  = "2"
+  period              = "120"
+  statistic           = "Average"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.backend.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "scale_up" {
+  alarm_description   = "Monitors CPU utilization for backend ASG"
+  alarm_actions       = [aws_autoscaling_policy.scale_up.arn]
+  alarm_name          = "backend_scale_up"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  namespace           = "AWS/EC2"
+  metric_name         = "CPUUtilization"
+  threshold           = "50"
+  evaluation_periods  = "1"
+  period              = "10"
+  statistic           = "Average"
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.backend.name
+  }
+}
+
